@@ -1,0 +1,17 @@
+name: Publish NeoForge inpaint fix release
+on:
+  push:
+    branches: [release-neoforge-fix-v1]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_COMMIT: b6c753c975999462d37cfc384dff19d8bcc4579c
+        run: |
+          gh release create v25.3.0-neoforge.1 --target "$RELEASE_COMMIT" --title "ADetailer NeoForge - Inpaint and ANIMA fixes" --notes "Fix VAE-aligned inpaint dimensions and temporarily suspend ANIMA Reference mode during inpainting. Includes 21 focused tests. Locally smoke-tested on Forge Neo 2.33." --latest
