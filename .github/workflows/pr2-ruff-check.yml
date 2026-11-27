@@ -1,7 +1,9 @@
-name: Check ADetailer PR 2 cleanup
-on: push
+name: Validate Ruff cleanup for ADetailer PR 2
+on:
+  push:
+    branches: [pr2-ruff-check]
 permissions:
-  contents: read
+  contents: write
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -11,13 +13,80 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install ruff==0.9.9 pytest
-      - name: Original findings
-        run: ruff check aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py || true
-      - name: Safe cleanup and remaining findings
+      - name: Apply narrowly scoped cleanup
         run: |
-          ruff check --fix aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py || true
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          
+          def edit(path, transform):
+              p = Path(path)
+              original = p.read_text()
+              updated = transform(original)
+              assert updated != original, path
+              p.write_text(updated)
+          
+          def align(s):
+              s = s.replace("    width: int,\n    height: int,\n", "    size: tuple[int, int],\n", 1)
+              s = s.replace("    alignment = vae_spatial_alignment(model)\n", "    width, height = size\n    alignment = vae_spatial_alignment(model)\n", 1)
+              old = """        if not separate_size and actual is not None:
+                      # Reuse the real generated size if Forge rounded this axis.
+                      # Do not replace a deliberately different Hires/skip-img2img size.
+                      if actual > 0 and actual % multiple == 0 and abs(actual - value) < multiple:
+                          return actual"""
+              new = """        # Reuse the real generated size if Forge rounded this axis.
+                  # Do not replace a deliberately different Hires/skip-img2img size.
+                  if (
+                      not separate_size
+                      and actual is not None
+                      and actual > 0
+                      and actual % multiple == 0
+                      and abs(actual - value) < multiple
+                  ):
+                      return actual"""
+              assert old in s
+              return s.replace(old, new)
+          edit("aaaaaa/inpaint_size.py", align)
+          edit("scripts/!adetailer.py", lambda s: s.replace("                *requested_size,\n", "                requested_size,\n", 1))
+          
+          def test_size(s):
+              s = s.replace("'requested,actual'", '("requested", "actual")')
+              s = s.replace("align_inpaint_size(*requested,", "align_inpaint_size(requested,")
+              return re.sub(r"align_inpaint_size\((\d+),(\d+),", r"align_inpaint_size((\1, \2), ", s)
+          edit("tests/test_inpaint_size.py", test_size)
+          
+          def test_anima(s):
+              s = re.sub(r"(?m)^(\s*)assert ([^\n]+?) and ([^\n]+)$", r"\1assert \2\n\1assert \3", s)
+              old = """    with pytest.raises(error):
+                  with suspend_anima_reference(opts, Anima()):
+                      assert opts.data[KEY] is False
+                      raise error('test')
+          """
+              new = """    def fail_during_inpaint():
+                  with suspend_anima_reference(opts, Anima()):
+                      assert opts.data[KEY] is False
+                      msg = "test"
+                      raise error(msg)
+          
+              with pytest.raises(error, match="test"):
+                  fail_during_inpaint()
+          """
+              assert old in s
+              return s.replace(old, new)
+          edit("tests/test_anima_reference.py", test_anima)
+          PY
+          ruff check --fix aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py
           ruff format aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py
-          ruff check aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py || true
-          git diff -- aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py
-          ruff check 'scripts/!adetailer.py' || true
-      - run: python -m pytest -q tests/test_anima_reference.py tests/test_inpaint_size.py
+          ruff check aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py
+          ruff format --check aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py
+          git diff --stat
+          git diff
+      - name: Focused PR tests
+        run: python -m pytest --noconftest -q tests/test_anima_reference.py tests/test_inpaint_size.py
+      - name: Store verified cleanup on service branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add aaaaaa/anima_reference.py aaaaaa/inpaint_size.py tests/test_anima_reference.py tests/test_inpaint_size.py 'scripts/!adetailer.py'
+          git commit -m "Apply and validate Ruff cleanup"
+          git push origin HEAD:pr2-ruff-check
